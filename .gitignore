@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+*.pyc
+*.db
+frontend/dist/
+.env
+.claude/
+backend/check_*.py
