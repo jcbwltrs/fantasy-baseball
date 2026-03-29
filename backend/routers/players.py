@@ -143,17 +143,58 @@ async def get_available_players(
 
 @router.get("/search")
 async def search_players(q: str = Query(..., min_length=2)):
-    """Search for a player by name."""
+    """Search for a player by name. Returns virtual split entries for two-way players."""
+    from config import TWO_WAY_PLAYERS
+
     results = await search_player(q)
-    return {"players": [
-        {
-            "player_id": p.get("id"),
-            "player_name": p.get("fullName"),
-            "team": p.get("currentTeam", {}).get("abbreviation", ""),
-            "position": p.get("primaryPosition", {}).get("abbreviation", ""),
-        }
-        for p in results[:20]
-    ]}
+    players = []
+    two_way_base_ids = set(TWO_WAY_PLAYERS.keys())
+
+    for p in results[:20]:
+        pid = p.get("id")
+        if pid in two_way_base_ids:
+            # Replace base player with the two virtual entries
+            twp = TWO_WAY_PLAYERS[pid]
+            team_abbrev = p.get("currentTeam", {}).get("abbreviation", "")
+            players.append({
+                "player_id": twp["batter_id"],
+                "player_name": twp["batter_name"],
+                "team": team_abbrev,
+                "position": "DH",
+            })
+            players.append({
+                "player_id": twp["pitcher_id"],
+                "player_name": twp["pitcher_name"],
+                "team": team_abbrev,
+                "position": "SP",
+            })
+        else:
+            players.append({
+                "player_id": pid,
+                "player_name": p.get("fullName"),
+                "team": p.get("currentTeam", {}).get("abbreviation", ""),
+                "position": p.get("primaryPosition", {}).get("abbreviation", ""),
+            })
+
+    # Also search local DB for virtual players (in case MLB API doesn't return them)
+    db = await get_db()
+    q_lower = q.lower()
+    cursor = await db.execute(
+        "SELECT player_id, player_name, team, primary_position FROM players WHERE LOWER(player_name) LIKE ?",
+        (f"%{q_lower}%",)
+    )
+    local_rows = await cursor.fetchall()
+    existing_ids = {p["player_id"] for p in players}
+    for row in local_rows:
+        if row["player_id"] not in existing_ids:
+            players.append({
+                "player_id": row["player_id"],
+                "player_name": row["player_name"],
+                "team": row["team"],
+                "position": row["primary_position"],
+            })
+
+    return {"players": players[:30]}
 
 
 @router.get("/{player_id}")
