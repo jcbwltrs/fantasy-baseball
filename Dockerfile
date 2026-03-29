@@ -27,7 +27,5 @@ RUN mkdir -p /data
 ENV PYTHONUNBUFFERED=1
 ENV DB_PATH=/data/fantasy_baseball.db
 
-EXPOSE 8000
-
-# Run the FastAPI server
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "/app/backend"]
+# Railway sets PORT dynamically — use shell form to expand $PORT
+CMD python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --app-dir /app/backend
