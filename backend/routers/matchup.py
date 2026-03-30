@@ -231,10 +231,24 @@ async def _do_project(req: ProjectWeekRequest):
     }
 
 
+async def _get_team_games_in_window(db, team, start_date, end_date):
+    """Get how many games a team played in a date window (from game logs)."""
+    cursor = await db.execute("""
+        SELECT COUNT(DISTINCT game_date) as team_gp
+        FROM player_game_logs
+        WHERE game_date >= ? AND game_date <= ?
+        AND player_id IN (SELECT player_id FROM players WHERE team = ?)
+    """, (start_date, end_date, team))
+    row = await cursor.fetchone()
+    return row["team_gp"] if row else 0
+
+
 async def _project_roster_detailed(db, roster, start_date, end_date, team_games, team_rs, league_avg_rpg):
     """Project total points for a roster and return per-player breakdown."""
     total = 0
     players = []
+    # Cache team games-in-window lookups
+    team_gp_cache = {}
 
     for row in roster:
         r = dict(row)  # Convert sqlite3.Row to dict for .get() support
@@ -269,13 +283,29 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
         total_pts = sum(lg["fantasy_points"] for lg in logs) if logs else 0
         ppg = total_pts / gp if gp > 0 else 0
 
-        games = team_games.get(team, 0)
+        week_team_games = team_games.get(team, 0)
+
+        # Estimate per-player games this week using their play rate
+        # play_rate = player games / team games in the same window
+        if gp > 0 and team:
+            if team not in team_gp_cache:
+                team_gp_cache[team] = await _get_team_games_in_window(db, team, start_date, end_date)
+            team_gp_in_window = team_gp_cache[team]
+            if team_gp_in_window > 0:
+                play_rate = min(gp / team_gp_in_window, 1.0)
+            else:
+                play_rate = 1.0  # No team data, assume everyday
+        else:
+            play_rate = 1.0  # No logs yet, assume everyday
+
+        projected_games = round(play_rate * week_team_games, 1)
 
         # Only project starters (not bench)
         if slot == "BN":
             proj = 0
+            projected_games = 0
         else:
-            proj = ppg * games
+            proj = ppg * projected_games
 
             if is_pitcher and team in team_rs:
                 rs = team_rs[team]
@@ -289,7 +319,7 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
                     is_starter=is_starter
                 )
                 if is_starter:
-                    proj += wpps * 1 * 10 + 0.20 * 1 * -5
+                    proj += wpps * projected_games * 10 + 0.20 * projected_games * -5
 
         total += proj
         players.append({
@@ -298,7 +328,7 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
             "team": team,
             "slot": slot,
             "ppg": round(ppg, 2),
-            "games": games,
+            "games": projected_games,
             "projected": round(proj, 1),
             "is_pitcher": is_pitcher,
         })
