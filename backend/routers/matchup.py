@@ -288,6 +288,11 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games)
 
         projected_games = round(play_rate * week_team_games, 1)
 
+        # SPs almost never get 2 starts in one week — cap at 1
+        is_starter = (primary_pos == "SP" or slot == "SP")
+        if is_starter:
+            projected_games = min(projected_games, 1)
+
         # Only project starters (not bench)
         if slot == "BN":
             proj = 0
