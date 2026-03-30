@@ -191,6 +191,13 @@ async def _do_project(req: ProjectWeekRequest):
     combined_std = math.sqrt(my_std**2 + opp_std**2)
     win_prob = 0.5 * (1 + math.erf(diff / (combined_std * math.sqrt(2)))) if combined_std > 0 else 0.5
 
+    logger.info(f"team_games sample: {dict(list(team_games.items())[:5])}")
+    logger.info(f"ref_date={ref_date}, start_date={start_date}, end_date={end_date}")
+    logger.info(f"my_roster count={len(my_roster)}, opp_roster count={len(opp_roster)}")
+    if my_roster:
+        sample = dict(my_roster[0])
+        logger.info(f"Sample roster row team field: '{sample.get('team', 'MISSING')}'")
+
     return {
         "my_projected_pts": round(my_total, 1),
         "opponent_projected_pts": round(opp_total, 1),
@@ -202,6 +209,14 @@ async def _do_project(req: ProjectWeekRequest):
         "my_roster_count": len(my_roster),
         "opp_roster_count": len(opp_roster),
         "week": {"start": req.week_start, "end": req.week_end, "number": req.week_number},
+        "_debug": {
+            "ref_date": ref_date,
+            "start_date": start_date,
+            "end_date": end_date,
+            "team_games_sample": dict(list(team_games.items())[:5]),
+            "total_games_found": len(team_games),
+            "sample_roster_teams": [dict(r).get("team", "") for r in my_roster[:3]] if my_roster else [],
+        },
     }
 
 

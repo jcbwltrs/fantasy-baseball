@@ -339,6 +339,16 @@ function ProjectTab() {
             </div>
           </div>
 
+          {/* Debug info (temporary) */}
+          {result._debug && (
+            <div className="bg-slate-100 rounded-xl p-3 text-xs font-mono text-slate-600 space-y-1">
+              <div>ref_date: {result._debug.ref_date} | window: {result._debug.start_date} → {result._debug.end_date}</div>
+              <div>MLB schedule games found: {result._debug.total_games_found} teams</div>
+              <div>team_games sample: {JSON.stringify(result._debug.team_games_sample)}</div>
+              <div>roster team abbrevs: {JSON.stringify(result._debug.sample_roster_teams)}</div>
+            </div>
+          )}
+
           {/* Advantage/Risk banner */}
           {result.my_projected_pts > result.opponent_projected_pts ? (
             <div className="bg-[#A3DFC4]/20 border border-[#A3DFC4] rounded-xl p-3 text-sm text-emerald-800 shadow-sm">
