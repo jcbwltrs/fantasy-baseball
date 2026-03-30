@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { projectMatchup, searchPlayers, getMatchupSchedule, saveMatchupSchedule, getLeagueTeams } from '../api/client';
+import { projectMatchup, getMatchupSchedule, saveMatchupSchedule, getLeagueTeams } from '../api/client';
 import LoadingSkeleton from '../components/LoadingSkeleton';
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 
 // Season weeks: Week 1 is short (Wed 3/25 - Sun 3/29), then Mon-Sun
 const SEASON_WEEKS = generateSeasonWeeks();
@@ -36,7 +36,6 @@ function generateSeasonWeeks() {
 
 export default function Matchup() {
   const [tab, setTab] = useState('schedule'); // schedule | project
-  const queryClient = useQueryClient();
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
@@ -71,11 +70,9 @@ function ScheduleTab() {
   const teams = teamsQ.data?.teams || [];
   const existingWeeks = scheduleQ.data?.weeks || [];
 
-  // Build local schedule state from existing data or blank
   const [localSchedule, setLocalSchedule] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  // Initialize local schedule from server data
   const schedule = localSchedule || buildScheduleFromServer(existingWeeks);
 
   const saveMutation = useMutation({
@@ -117,9 +114,6 @@ function ScheduleTab() {
     saveMutation.mutate(matchups);
   };
 
-  const myTeam = teams.find(t => t.is_mine);
-
-  // Format date for display: "Mar 25" style
   const fmtDate = (d) => {
     const dt = new Date(d + 'T00:00:00');
     return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -129,7 +123,7 @@ function ScheduleTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-slate-500">
-          Set your opponent for each week of the season. Only your matchups (Team 1) are needed for projections.
+          Set your opponent for each week. Projections will auto-pull both rosters from the My Roster tab.
         </p>
         <button onClick={handleSave} disabled={saving}
           className="px-4 py-1.5 rounded-lg text-sm bg-[#A3DFC4] text-[#2d2d3d] font-semibold hover:bg-[#A3DFC4]/80 disabled:opacity-50 transition shadow-sm">
@@ -151,7 +145,7 @@ function ScheduleTab() {
               <tbody>
                 {SEASON_WEEKS.map(week => {
                   const weekData = schedule[week.week_number];
-                  const myMatchup = weekData?.matchups?.[1] || 0; // team 1's opponent
+                  const myMatchup = weekData?.matchups?.[1] || 0;
 
                   return (
                     <tr key={week.week_number} className="border-b border-[#A9B8E2]/15 hover:bg-[#AACBF5]/10">
@@ -210,53 +204,31 @@ function buildScheduleFromServer(weeks) {
 
 
 function ProjectTab() {
+  const [selectedWeek, setSelectedWeek] = useState(1);
   const [window, setWindow] = useState('14d');
-  const today = new Date();
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - today.getDay() + 1);
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
 
-  const [weekStart, setWeekStart] = useState(monday.toISOString().split('T')[0]);
-  const [weekEnd, setWeekEnd] = useState(sunday.toISOString().split('T')[0]);
+  const scheduleQ = useQuery({ queryKey: ['matchupSchedule'], queryFn: getMatchupSchedule });
+  const teamsQ = useQuery({ queryKey: ['leagueTeams'], queryFn: getLeagueTeams });
 
-  const [oppPlayers, setOppPlayers] = useState([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [searching, setSearching] = useState(false);
+  const teams = teamsQ.data?.teams || [];
+  const existingWeeks = scheduleQ.data?.weeks || [];
+  const schedule = buildScheduleFromServer(existingWeeks);
 
-  const handleSearch = useCallback(async (q) => {
-    setSearchQuery(q);
-    if (q.length < 2) { setSearchResults([]); return; }
-    setSearching(true);
-    try {
-      const res = await searchPlayers(q);
-      setSearchResults(res.players || []);
-    } finally {
-      setSearching(false);
-    }
-  }, []);
-
-  const addOppPlayer = (player) => {
-    if (!oppPlayers.find(p => p.player_id === player.player_id)) {
-      setOppPlayers([...oppPlayers, player]);
-    }
-    setSearchQuery('');
-    setSearchResults([]);
-  };
-
-  const removeOppPlayer = (id) => {
-    setOppPlayers(oppPlayers.filter(p => p.player_id !== id));
-  };
+  // Find opponent for selected week
+  const weekData = schedule[selectedWeek];
+  const opponentId = weekData?.matchups?.[1] || 0;
+  const opponentName = teams.find(t => t.team_id === opponentId)?.team_name || 'No opponent set';
+  const weekInfo = SEASON_WEEKS.find(w => w.week_number === selectedWeek);
 
   const projectMutation = useMutation({ mutationFn: projectMatchup });
 
   const handleProject = () => {
+    if (!weekInfo || !opponentId) return;
     projectMutation.mutate({
-      opponent_roster: oppPlayers.map(p => p.player_id),
+      week_number: selectedWeek,
       window,
-      week_start: weekStart,
-      week_end: weekEnd,
+      week_start: weekInfo.week_start,
+      week_end: weekInfo.week_end,
     });
   };
 
@@ -264,12 +236,28 @@ function ProjectTab() {
   const wpColor = result?.win_probability >= 0.6 ? '#059669'
     : result?.win_probability >= 0.45 ? '#d97706' : '#dc2626';
 
+  const fmtDate = (d) => {
+    const dt = new Date(d + 'T00:00:00');
+    return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
   return (
     <div className="space-y-4">
       {/* Controls */}
       <div className="flex flex-wrap items-end gap-4">
         <div>
-          <label className="block text-xs text-slate-500 mb-1">Window</label>
+          <label className="block text-xs text-slate-500 mb-1">Week</label>
+          <select value={selectedWeek} onChange={e => setSelectedWeek(parseInt(e.target.value))}
+            className="bg-white border border-[#A9B8E2]/50 rounded-lg px-3 py-1.5 text-sm text-[#2d2d3d] shadow-sm">
+            {SEASON_WEEKS.map(w => (
+              <option key={w.week_number} value={w.week_number}>
+                {w.week_label} ({fmtDate(w.week_start)} — {fmtDate(w.week_end)})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Performance Window</label>
           <select value={window} onChange={e => setWindow(e.target.value)}
             className="bg-white border border-[#A9B8E2]/50 rounded-lg px-3 py-1.5 text-sm text-[#2d2d3d] shadow-sm">
             <option value="7d">7 Days</option>
@@ -278,65 +266,38 @@ function ProjectTab() {
             <option value="season">Season</option>
           </select>
         </div>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Week Start</label>
-          <input type="date" value={weekStart} onChange={e => setWeekStart(e.target.value)}
-            className="bg-white border border-[#A9B8E2]/50 rounded-lg px-3 py-1.5 text-sm text-[#2d2d3d] shadow-sm" />
-        </div>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Week End</label>
-          <input type="date" value={weekEnd} onChange={e => setWeekEnd(e.target.value)}
-            className="bg-white border border-[#A9B8E2]/50 rounded-lg px-3 py-1.5 text-sm text-[#2d2d3d] shadow-sm" />
-        </div>
-      </div>
-
-      {/* Opponent Roster */}
-      <div className="bg-white rounded-xl border border-[#A9B8E2]/30 p-4 space-y-3 shadow-sm">
-        <h3 className="text-sm font-semibold text-slate-500">Opponent Roster</h3>
-        <div className="relative">
-          <input type="text" value={searchQuery} onChange={e => handleSearch(e.target.value)}
-            placeholder="Search opponent's players..."
-            className="w-full max-w-md bg-white border border-[#A9B8E2]/50 rounded-lg px-4 py-2 text-[#2d2d3d] placeholder-slate-400 focus:outline-none focus:border-[#AACBF5] shadow-sm" />
-          {searchResults.length > 0 && (
-            <div className="absolute top-full left-0 mt-1 w-full max-w-md bg-white border border-[#A9B8E2] rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto">
-              {searchResults.map(p => (
-                <button key={p.player_id} onClick={() => addOppPlayer(p)}
-                  className="w-full text-left px-4 py-2 hover:bg-[#AACBF5]/15 text-sm flex justify-between">
-                  <span className="text-[#2d2d3d]">{p.player_name}</span>
-                  <span className="text-slate-400">{p.team} · {p.position}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {oppPlayers.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {oppPlayers.map(p => (
-              <span key={p.player_id}
-                className="inline-flex items-center gap-1 bg-[#AACBF5]/30 text-[#4a6fa5] text-sm px-2 py-1 rounded-lg font-medium">
-                {p.player_name}
-                <button onClick={() => removeOppPlayer(p.player_id)} className="text-[#4a6fa5]/60 hover:text-[#4a6fa5] ml-1">×</button>
-              </span>
-            ))}
+        <div className="flex items-center gap-3">
+          <div className="text-sm">
+            <span className="text-slate-400">vs </span>
+            <span className={`font-semibold ${opponentId ? 'text-[#2d2d3d]' : 'text-red-400'}`}>
+              {opponentId ? opponentName : 'No opponent set — save your schedule first'}
+            </span>
           </div>
-        )}
-
-        <button onClick={handleProject} disabled={oppPlayers.length === 0 || projectMutation.isPending}
+        </div>
+        <button onClick={handleProject}
+          disabled={!opponentId || projectMutation.isPending}
           className="px-4 py-1.5 rounded-lg text-sm bg-[#AACBF5] text-[#2d2d3d] font-semibold hover:bg-[#AACBF5]/80 disabled:opacity-50 transition shadow-sm">
           {projectMutation.isPending ? 'Projecting...' : 'Project Matchup'}
         </button>
       </div>
 
-      {projectMutation.isPending && <LoadingSkeleton rows={6} cols={4} />}
+      {projectMutation.isPending && <LoadingSkeleton rows={8} cols={4} />}
+
+      {result?.error && (
+        <div className="bg-[#FFB8BF]/20 border border-[#FFB8BF] rounded-xl p-4 text-red-600 shadow-sm">
+          {result.error}
+        </div>
+      )}
 
       {/* Results */}
-      {result && (
+      {result && !result.error && (
         <div className="space-y-4">
+          {/* Score cards */}
           <div className="grid grid-cols-3 gap-4">
             <div className="bg-white rounded-xl border border-[#A3DFC4] p-4 text-center shadow-sm">
-              <div className="text-sm text-slate-500">My Projection</div>
+              <div className="text-sm text-slate-500">My Team</div>
               <div className="text-3xl font-bold text-emerald-700">{result.my_projected_pts}</div>
+              <div className="text-xs text-slate-400 mt-1">{result.my_roster_count} players</div>
             </div>
             <div className="bg-white rounded-xl border border-[#A9B8E2]/30 p-4 text-center shadow-sm">
               <div className="text-sm text-slate-500">Win Probability</div>
@@ -351,22 +312,100 @@ function ProjectTab() {
               </div>
             </div>
             <div className="bg-white rounded-xl border border-[#FFB8BF] p-4 text-center shadow-sm">
-              <div className="text-sm text-slate-500">Opponent Projection</div>
+              <div className="text-sm text-slate-500">{result.opponent_name}</div>
               <div className="text-3xl font-bold text-red-500">{result.opponent_projected_pts}</div>
+              <div className="text-xs text-slate-400 mt-1">{result.opp_roster_count} players</div>
             </div>
           </div>
 
+          {/* Advantage/Risk banner */}
           {result.my_projected_pts > result.opponent_projected_pts ? (
             <div className="bg-[#A3DFC4]/20 border border-[#A3DFC4] rounded-xl p-3 text-sm text-emerald-800 shadow-sm">
-              Key Advantage: You're projected to win by {(result.my_projected_pts - result.opponent_projected_pts).toFixed(1)} points
+              Projected to win by {(result.my_projected_pts - result.opponent_projected_pts).toFixed(1)} points
             </div>
           ) : (
             <div className="bg-[#FFB8BF]/20 border border-[#FFB8BF] rounded-xl p-3 text-sm text-red-700 shadow-sm">
-              Key Risk: Opponent projected ahead by {(result.opponent_projected_pts - result.my_projected_pts).toFixed(1)} points
+              Opponent projected ahead by {(result.opponent_projected_pts - result.my_projected_pts).toFixed(1)} points
             </div>
           )}
+
+          {/* Side-by-side roster breakdown */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <RosterBreakdown title="My Team" players={result.my_players} colorClass="text-emerald-700" />
+            <RosterBreakdown title={result.opponent_name} players={result.opp_players} colorClass="text-red-500" />
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+function RosterBreakdown({ title, players, colorClass }) {
+  if (!players || players.length === 0) {
+    return (
+      <div className="bg-white rounded-xl border border-[#A9B8E2]/30 p-4 shadow-sm">
+        <h3 className="text-sm font-semibold text-slate-500 mb-2">{title}</h3>
+        <div className="text-sm text-slate-400">No roster loaded. Add players in the My Roster tab.</div>
+      </div>
+    );
+  }
+
+  const starters = players.filter(p => p.slot !== 'BN' && p.slot !== 'IL');
+  const bench = players.filter(p => p.slot === 'BN');
+  const il = players.filter(p => p.slot === 'IL');
+
+  return (
+    <div className="bg-white rounded-xl border border-[#A9B8E2]/30 overflow-hidden shadow-sm">
+      <div className="px-4 py-2 border-b border-[#A9B8E2]/20 bg-[#AACBF5]/10">
+        <span className="text-sm font-semibold text-[#2d2d3d]">{title}</span>
+        <span className="text-xs text-slate-400 ml-2">
+          {starters.reduce((sum, p) => sum + p.projected, 0).toFixed(1)} projected pts
+        </span>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-slate-400 border-b border-[#A9B8E2]/15">
+            <th className="text-left py-1 px-3 w-12">Slot</th>
+            <th className="text-left px-2">Player</th>
+            <th className="text-left px-2 w-10">Tm</th>
+            <th className="text-right px-2 w-12">PPG</th>
+            <th className="text-right px-2 w-10">G</th>
+            <th className="text-right px-2 w-14">Proj</th>
+          </tr>
+        </thead>
+        <tbody>
+          {starters.map((p, i) => (
+            <tr key={p.player_id} className="border-b border-[#A9B8E2]/10 hover:bg-[#AACBF5]/5">
+              <td className="py-1 px-3">
+                <span className="font-mono text-[10px] px-1 py-0.5 rounded bg-[#A9B8E2]/20 text-slate-500">{p.slot}</span>
+              </td>
+              <td className="px-2 text-[#2d2d3d] font-medium truncate max-w-[120px]">{p.player_name}</td>
+              <td className="px-2 text-slate-400">{p.team}</td>
+              <td className="px-2 text-right font-mono text-slate-500">{p.ppg}</td>
+              <td className="px-2 text-right text-slate-400">{p.games}</td>
+              <td className={`px-2 text-right font-mono font-medium ${colorClass}`}>{p.projected}</td>
+            </tr>
+          ))}
+          {bench.length > 0 && (
+            <>
+              <tr><td colSpan={6} className="px-3 pt-2 pb-1 text-[10px] font-semibold text-slate-400 uppercase">Bench</td></tr>
+              {bench.map(p => (
+                <tr key={p.player_id} className="border-b border-[#A9B8E2]/10">
+                  <td className="py-1 px-3">
+                    <span className="font-mono text-[10px] px-1 py-0.5 rounded bg-slate-100 text-slate-400">BN</span>
+                  </td>
+                  <td className="px-2 text-slate-400">{p.player_name}</td>
+                  <td className="px-2 text-slate-300">{p.team}</td>
+                  <td className="px-2 text-right font-mono text-slate-300">{p.ppg}</td>
+                  <td className="px-2 text-right text-slate-300">{p.games}</td>
+                  <td className="px-2 text-right font-mono text-slate-300">—</td>
+                </tr>
+              ))}
+            </>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

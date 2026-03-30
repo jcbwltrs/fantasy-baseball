@@ -13,10 +13,11 @@ from db import (
 )
 from services.run_support import calculate_wpps
 from services.mlb_api import get_schedule
-from models import MatchupProjectRequest
 from config import CURRENT_SEASON
 import math
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/matchup", tags=["matchup"])
 
 WINDOW_DAYS = {"3d": 3, "7d": 7, "14d": 14, "30d": 30, "season": 365}
@@ -112,105 +113,112 @@ async def get_my_matchup(week_number: int = Query(...)):
     }
 
 
-# --- Projection endpoint ---
+# --- Projection endpoint (uses rosters from My Roster tab) ---
+
+class ProjectWeekRequest(BaseModel):
+    week_number: int
+    window: str = "14d"
+    week_start: str
+    week_end: str
+
 
 @router.post("/project")
-async def project_matchup(req: MatchupProjectRequest):
-    """Project weekly matchup vs opponent."""
+async def project_matchup(req: ProjectWeekRequest):
+    """Project weekly matchup using rosters already set in My Roster tab."""
     db = await get_db()
-    try:
-        # Get schedule for game counts
-        schedule = await get_schedule(req.week_start, req.week_end)
-        team_games = _count_team_games(schedule)
 
-        # Run support
-        rs_rows = await get_all_team_run_support(db)
-        team_rs = {}
-        league_avg_rpg = 4.3
-        if rs_rows:
-            for rs in rs_rows:
-                team_rs[rs["team_abbrev"]] = dict(rs)
-            total = sum(r.get("runs_per_game", 0) for r in team_rs.values())
-            if team_rs:
-                league_avg_rpg = total / len(team_rs)
+    # Find opponent from schedule
+    matchup_row = await get_week_matchup(db, req.week_number, 1)
+    if not matchup_row:
+        return {"error": f"No matchup set for Week {req.week_number}. Set your schedule first.", "success": False}
 
-        # Window (use reference date, not utcnow)
-        ref_date = await get_reference_date(db)
-        ref_dt = datetime.strptime(ref_date, "%Y-%m-%d")
-        if req.window == "season":
-            start_date = f"{CURRENT_SEASON}-01-01"
-        else:
-            days = WINDOW_DAYS.get(req.window, 14)
-            start_date = (ref_dt - timedelta(days=days)).strftime("%Y-%m-%d")
-        end_date = ref_date
+    opponent_id = matchup_row["team_b_id"] if matchup_row["team_a_id"] == 1 else matchup_row["team_a_id"]
+    teams = await get_league_teams(db)
+    team_map = {t["team_id"]: t["team_name"] for t in teams}
+    opponent_name = team_map.get(opponent_id, f"Team {opponent_id}")
 
-        # Project my roster
-        roster = await get_roster(db)
-        my_total = await _project_roster(db, roster, start_date, end_date, team_games, team_rs, league_avg_rpg)
+    # Get schedule for game counts
+    schedule = await get_schedule(req.week_start, req.week_end)
+    team_games = _count_team_games(schedule)
 
-        # Project opponent
-        opp_players = []
-        for pid in req.opponent_roster:
-            cursor = await db.execute(
-                "SELECT p.*, ps.era, ps.games_started, ps.games_played as season_gp "
-                "FROM players p LEFT JOIN player_season_stats ps ON p.player_id = ps.player_id "
-                "WHERE p.player_id = ?", (pid,)
-            )
-            row = await cursor.fetchone()
-            if row:
-                opp_players.append(row)
+    # Run support
+    rs_rows = await get_all_team_run_support(db)
+    team_rs = {}
+    league_avg_rpg = 4.3
+    if rs_rows:
+        for rs in rs_rows:
+            team_rs[rs["team_abbrev"]] = dict(rs)
+        total = sum(r.get("runs_per_game", 0) for r in team_rs.values())
+        if team_rs:
+            league_avg_rpg = total / len(team_rs)
 
-        opp_total = 0
-        for row in opp_players:
-            pid = row["player_id"]
-            team = row["team"] or ""
-            is_pitcher = bool(row["is_pitcher"])
+    # Window (use reference date)
+    ref_date = await get_reference_date(db)
+    ref_dt = datetime.strptime(ref_date, "%Y-%m-%d")
+    if req.window == "season":
+        start_date = f"{CURRENT_SEASON}-01-01"
+    else:
+        days = WINDOW_DAYS.get(req.window, 14)
+        start_date = (ref_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+    end_date = ref_date
 
-            logs = await get_player_game_logs(db, pid, start_date, end_date)
-            gp = len(logs) if logs else 0
-            total_pts = sum(r["fantasy_points"] for r in logs) if logs else 0
-            ppg = total_pts / gp if gp > 0 else 0
+    # Project MY roster (team 1)
+    my_roster = await get_roster(db, 1)
+    my_players, my_total = await _project_roster_detailed(
+        db, my_roster, start_date, end_date, team_games, team_rs, league_avg_rpg
+    )
 
-            games = team_games.get(team, 0)
-            proj = ppg * games
+    # Project OPPONENT roster (from their league_rosters)
+    opp_roster = await get_roster(db, opponent_id)
+    opp_players, opp_total = await _project_roster_detailed(
+        db, opp_roster, start_date, end_date, team_games, team_rs, league_avg_rpg
+    )
 
-            if is_pitcher and team in team_rs:
-                rs = team_rs[team]
-                era = row["era"] if row["era"] else 4.50
-                wpps = calculate_wpps(
-                    era, rs.get("runs_per_game", league_avg_rpg),
-                    league_avg_rpg, 4.20,
-                    is_starter=(row["primary_position"] == "SP")
-                )
-                if row["primary_position"] == "SP":
-                    proj += wpps * 1 * 10 + 0.20 * 1 * -5
+    # Win probability
+    my_std = max(my_total * 0.18, 10)
+    opp_std = max(opp_total * 0.18, 10)
+    diff = my_total - opp_total
+    combined_std = math.sqrt(my_std**2 + opp_std**2)
+    win_prob = 0.5 * (1 + math.erf(diff / (combined_std * math.sqrt(2)))) if combined_std > 0 else 0.5
 
-            opp_total += proj
-
-        # Win probability
-        my_std = max(my_total * 0.18, 10)
-        opp_std = max(opp_total * 0.18, 10)
-        diff = my_total - opp_total
-        combined_std = math.sqrt(my_std**2 + opp_std**2)
-        win_prob = 0.5 * (1 + math.erf(diff / (combined_std * math.sqrt(2)))) if combined_std > 0 else 0.5
-
-        return {
-            "my_projected_pts": round(my_total, 1),
-            "opponent_projected_pts": round(opp_total, 1),
-            "win_probability": round(win_prob, 3),
-            "week": {"start": req.week_start, "end": req.week_end},
-        }
-    finally:
-        pass  # shared connection
+    return {
+        "my_projected_pts": round(my_total, 1),
+        "opponent_projected_pts": round(opp_total, 1),
+        "win_probability": round(win_prob, 3),
+        "opponent_name": opponent_name,
+        "opponent_id": opponent_id,
+        "my_players": my_players,
+        "opp_players": opp_players,
+        "my_roster_count": len(my_roster),
+        "opp_roster_count": len(opp_roster),
+        "week": {"start": req.week_start, "end": req.week_end, "number": req.week_number},
+    }
 
 
-async def _project_roster(db, roster, start_date, end_date, team_games, team_rs, league_avg_rpg):
-    """Project total points for a roster."""
+async def _project_roster_detailed(db, roster, start_date, end_date, team_games, team_rs, league_avg_rpg):
+    """Project total points for a roster and return per-player breakdown."""
     total = 0
+    players = []
+
     for row in roster:
         pid = row["player_id"]
         team = row["team"] or ""
         is_pitcher = bool(row["is_pitcher"]) if "is_pitcher" in row.keys() else False
+        slot = row.get("roster_slot", "BN")
+
+        # Skip IL players
+        if slot == "IL":
+            players.append({
+                "player_id": pid,
+                "player_name": row["player_name"],
+                "team": team,
+                "slot": slot,
+                "ppg": 0,
+                "games": 0,
+                "projected": 0,
+                "is_pitcher": is_pitcher,
+            })
+            continue
 
         logs = await get_player_game_logs(db, pid, start_date, end_date)
         gp = len(logs) if logs else 0
@@ -218,22 +226,42 @@ async def _project_roster(db, roster, start_date, end_date, team_games, team_rs,
         ppg = total_pts / gp if gp > 0 else 0
 
         games = team_games.get(team, 0)
-        proj = ppg * games
 
-        if is_pitcher and team in team_rs:
-            rs = team_rs[team]
-            season = await get_player_season_stats(db, pid)
-            era = season["era"] if season and season["era"] else 4.50
-            wpps = calculate_wpps(
-                era, rs.get("runs_per_game", league_avg_rpg),
-                league_avg_rpg, 4.20,
-                is_starter=(row.get("primary_position") == "SP")
-            )
-            if row.get("primary_position") == "SP":
-                proj += wpps * 1 * 10 + 0.20 * 1 * -5
+        # Only project starters (not bench)
+        if slot == "BN":
+            proj = 0
+        else:
+            proj = ppg * games
+
+            if is_pitcher and team in team_rs:
+                rs = team_rs[team]
+                season = await get_player_season_stats(db, pid)
+                era = season["era"] if season and season["era"] else 4.50
+                wpps = calculate_wpps(
+                    era, rs.get("runs_per_game", league_avg_rpg),
+                    league_avg_rpg, 4.20,
+                    is_starter=(row.get("primary_position") == "SP" or slot == "SP")
+                )
+                if row.get("primary_position") == "SP" or slot == "SP":
+                    proj += wpps * 1 * 10 + 0.20 * 1 * -5
 
         total += proj
-    return total
+        players.append({
+            "player_id": pid,
+            "player_name": row["player_name"],
+            "team": team,
+            "slot": slot,
+            "ppg": round(ppg, 2),
+            "games": games,
+            "projected": round(proj, 1),
+            "is_pitcher": is_pitcher,
+        })
+
+    # Sort: starters first (by projected desc), then bench, then IL
+    slot_priority = {"IL": 2, "BN": 1}
+    players.sort(key=lambda p: (slot_priority.get(p["slot"], 0), -p["projected"]))
+
+    return players, total
 
 
 def _count_team_games(schedule):
