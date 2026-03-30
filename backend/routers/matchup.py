@@ -126,6 +126,14 @@ class ProjectWeekRequest(BaseModel):
 async def project_matchup(req: ProjectWeekRequest):
     """Project weekly matchup using rosters already set in My Roster tab."""
     logger.info(f"Project matchup request: week={req.week_number}, window={req.window}, start={req.week_start}, end={req.week_end}")
+    try:
+        return await _do_project(req)
+    except Exception as e:
+        logger.exception(f"Project matchup failed: {e}")
+        return {"error": f"Server error: {str(e)}", "success": False}
+
+
+async def _do_project(req: ProjectWeekRequest):
     db = await get_db()
 
     # Find opponent from schedule
@@ -203,16 +211,18 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
     players = []
 
     for row in roster:
-        pid = row["player_id"]
-        team = row["team"] or ""
-        is_pitcher = bool(row["is_pitcher"]) if "is_pitcher" in row.keys() else False
-        slot = row.get("roster_slot", "BN")
+        r = dict(row)  # Convert sqlite3.Row to dict for .get() support
+        pid = r["player_id"]
+        team = r.get("team") or ""
+        is_pitcher = bool(r.get("is_pitcher", False))
+        slot = r.get("roster_slot", "BN")
+        primary_pos = r.get("primary_position", "")
 
         # Skip IL players
         if slot == "IL":
             players.append({
                 "player_id": pid,
-                "player_name": row["player_name"],
+                "player_name": r["player_name"],
                 "team": team,
                 "slot": slot,
                 "ppg": 0,
@@ -224,7 +234,7 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
 
         logs = await get_player_game_logs(db, pid, start_date, end_date)
         gp = len(logs) if logs else 0
-        total_pts = sum(r["fantasy_points"] for r in logs) if logs else 0
+        total_pts = sum(lg["fantasy_points"] for lg in logs) if logs else 0
         ppg = total_pts / gp if gp > 0 else 0
 
         games = team_games.get(team, 0)
@@ -239,18 +249,20 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
                 rs = team_rs[team]
                 season = await get_player_season_stats(db, pid)
                 era = season["era"] if season and season["era"] else 4.50
+                rs_rpg = rs["runs_per_game"] if "runs_per_game" in rs else league_avg_rpg
+                is_starter = (primary_pos == "SP" or slot == "SP")
                 wpps = calculate_wpps(
-                    era, rs.get("runs_per_game", league_avg_rpg),
+                    era, rs_rpg,
                     league_avg_rpg, 4.20,
-                    is_starter=(row.get("primary_position") == "SP" or slot == "SP")
+                    is_starter=is_starter
                 )
-                if row.get("primary_position") == "SP" or slot == "SP":
+                if is_starter:
                     proj += wpps * 1 * 10 + 0.20 * 1 * -5
 
         total += proj
         players.append({
             "player_id": pid,
-            "player_name": row["player_name"],
+            "player_name": r["player_name"],
             "team": team,
             "slot": slot,
             "ppg": round(ppg, 2),
