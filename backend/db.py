@@ -346,7 +346,7 @@ async def get_roster_player_ids(db, league_team_id=1):
 
 async def get_roster(db, league_team_id=1):
     cursor = await db.execute("""
-        SELECT r.*, p.primary_position, p.is_pitcher, p.team_id
+        SELECT r.*, p.primary_position, p.is_pitcher, p.team_id, p.team as mlb_team
         FROM league_rosters r
         LEFT JOIN players p ON r.player_id = p.player_id
         WHERE r.league_team_id = ? AND r.is_active = 1

@@ -151,6 +151,19 @@ async def _do_project(req: ProjectWeekRequest):
     schedule = await get_schedule(req.week_start, req.week_end)
     team_games = _count_team_games(schedule)
 
+    # Fallback: if MLB API has no schedule data (future season), estimate games
+    if not team_games:
+        week_start_dt = datetime.strptime(req.week_start, "%Y-%m-%d")
+        week_end_dt = datetime.strptime(req.week_end, "%Y-%m-%d")
+        num_days = (week_end_dt - week_start_dt).days + 1
+        # MLB teams average ~0.9 games per day (162 games / 183 days)
+        estimated_games = max(1, round(num_days * 0.9))
+        # Get all team abbreviations from players table
+        cursor = await db.execute("SELECT DISTINCT team FROM players WHERE team IS NOT NULL AND team != ''")
+        all_teams = [row["team"] for row in await cursor.fetchall()]
+        team_games = {t: estimated_games for t in all_teams}
+        logger.info(f"No MLB schedule data — estimating {estimated_games} games per team for {num_days}-day week")
+
     # Run support
     rs_rows = await get_all_team_run_support(db)
     team_rs = {}
@@ -228,7 +241,7 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
     for row in roster:
         r = dict(row)  # Convert sqlite3.Row to dict for .get() support
         pid = r["player_id"]
-        team = r.get("team") or ""
+        team = r.get("team") or r.get("mlb_team") or ""
         is_pitcher = bool(r.get("is_pitcher", False))
         slot = r.get("roster_slot", "BN")
         primary_pos = r.get("primary_position", "")
