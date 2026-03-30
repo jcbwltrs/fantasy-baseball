@@ -119,6 +119,7 @@ async def get_schedule(start_date: str, end_date: str) -> list[dict]:
         "sportId": 1,
         "startDate": start_date,
         "endDate": end_date,
+        "hydrate": "team",
     })
     if not data:
         return []
