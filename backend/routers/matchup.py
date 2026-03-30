@@ -125,10 +125,12 @@ class ProjectWeekRequest(BaseModel):
 @router.post("/project")
 async def project_matchup(req: ProjectWeekRequest):
     """Project weekly matchup using rosters already set in My Roster tab."""
+    logger.info(f"Project matchup request: week={req.week_number}, window={req.window}, start={req.week_start}, end={req.week_end}")
     db = await get_db()
 
     # Find opponent from schedule
     matchup_row = await get_week_matchup(db, req.week_number, 1)
+    logger.info(f"Matchup row for week {req.week_number}: {dict(matchup_row) if matchup_row else None}")
     if not matchup_row:
         return {"error": f"No matchup set for Week {req.week_number}. Set your schedule first.", "success": False}
 

@@ -75,11 +75,22 @@ function ScheduleTab() {
 
   const schedule = localSchedule || buildScheduleFromServer(existingWeeks);
 
+  const [saveError, setSaveError] = useState(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
   const saveMutation = useMutation({
     mutationFn: saveMatchupSchedule,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['matchupSchedule'] });
       setSaving(false);
+      setSaveError(null);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    },
+    onError: (err) => {
+      setSaving(false);
+      setSaveError(err.message || 'Failed to save schedule');
+      setSaveSuccess(false);
     },
   });
 
@@ -125,10 +136,14 @@ function ScheduleTab() {
         <p className="text-sm text-slate-500">
           Set your opponent for each week. Projections will auto-pull both rosters from the My Roster tab.
         </p>
-        <button onClick={handleSave} disabled={saving}
-          className="px-4 py-1.5 rounded-lg text-sm bg-[#A3DFC4] text-[#2d2d3d] font-semibold hover:bg-[#A3DFC4]/80 disabled:opacity-50 transition shadow-sm">
-          {saving ? 'Saving...' : 'Save Schedule'}
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={handleSave} disabled={saving}
+            className="px-4 py-1.5 rounded-lg text-sm bg-[#A3DFC4] text-[#2d2d3d] font-semibold hover:bg-[#A3DFC4]/80 disabled:opacity-50 transition shadow-sm">
+            {saving ? 'Saving...' : 'Save Schedule'}
+          </button>
+          {saveSuccess && <span className="text-sm text-emerald-600 font-medium">Saved!</span>}
+          {saveError && <span className="text-sm text-red-500">{saveError}</span>}
+        </div>
       </div>
 
       {scheduleQ.isLoading ? <LoadingSkeleton rows={10} cols={4} /> : (
@@ -282,6 +297,12 @@ function ProjectTab() {
       </div>
 
       {projectMutation.isPending && <LoadingSkeleton rows={8} cols={4} />}
+
+      {projectMutation.isError && (
+        <div className="bg-[#FFB8BF]/20 border border-[#FFB8BF] rounded-xl p-4 text-red-600 shadow-sm">
+          API Error: {projectMutation.error?.message || 'Unknown error'}
+        </div>
+      )}
 
       {result?.error && (
         <div className="bg-[#FFB8BF]/20 border border-[#FFB8BF] rounded-xl p-4 text-red-600 shadow-sm">
