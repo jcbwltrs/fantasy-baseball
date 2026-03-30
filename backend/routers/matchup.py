@@ -6,12 +6,11 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db import (
-    get_db, get_roster, get_player_game_logs, get_player_season_stats,
-    get_all_team_run_support, get_reference_date,
+    get_db, get_roster, get_player_game_logs,
+    get_reference_date,
     get_matchup_schedule, get_week_matchup, upsert_matchup, set_full_schedule,
     get_league_teams,
 )
-from services.run_support import calculate_wpps
 from services.mlb_api import get_schedule
 from config import CURRENT_SEASON
 import math
@@ -162,17 +161,6 @@ async def _do_project(req: ProjectWeekRequest):
         team_games = {t: estimated_games for t in all_teams}
         logger.info(f"No MLB schedule data — estimating {estimated_games} games/team for {num_days}-day week")
 
-    # Run support
-    rs_rows = await get_all_team_run_support(db)
-    team_rs = {}
-    league_avg_rpg = 4.3
-    if rs_rows:
-        for rs in rs_rows:
-            team_rs[rs["team_abbrev"]] = dict(rs)
-        total = sum(r.get("runs_per_game", 0) for r in team_rs.values())
-        if team_rs:
-            league_avg_rpg = total / len(team_rs)
-
     # Window (use reference date)
     ref_date = await get_reference_date(db)
     ref_dt = datetime.strptime(ref_date, "%Y-%m-%d")
@@ -186,13 +174,13 @@ async def _do_project(req: ProjectWeekRequest):
     # Project MY roster (team 1)
     my_roster = await get_roster(db, 1)
     my_players, my_total = await _project_roster_detailed(
-        db, my_roster, start_date, end_date, team_games, team_rs, league_avg_rpg
+        db, my_roster, start_date, end_date, team_games
     )
 
     # Project OPPONENT roster (from their league_rosters)
     opp_roster = await get_roster(db, opponent_id)
     opp_players, opp_total = await _project_roster_detailed(
-        db, opp_roster, start_date, end_date, team_games, team_rs, league_avg_rpg
+        db, opp_roster, start_date, end_date, team_games
     )
 
     # Win probability
@@ -243,7 +231,7 @@ async def _get_team_games_in_window(db, team, start_date, end_date):
     return row["team_gp"] if row else 0
 
 
-async def _project_roster_detailed(db, roster, start_date, end_date, team_games, team_rs, league_avg_rpg):
+async def _project_roster_detailed(db, roster, start_date, end_date, team_games):
     """Project total points for a roster and return per-player breakdown."""
     total = 0
     players = []
@@ -306,20 +294,6 @@ async def _project_roster_detailed(db, roster, start_date, end_date, team_games,
             projected_games = 0
         else:
             proj = ppg * projected_games
-
-            if is_pitcher and team in team_rs:
-                rs = team_rs[team]
-                season = await get_player_season_stats(db, pid)
-                era = season["era"] if season and season["era"] else 4.50
-                rs_rpg = rs["runs_per_game"] if "runs_per_game" in rs else league_avg_rpg
-                is_starter = (primary_pos == "SP" or slot == "SP")
-                wpps = calculate_wpps(
-                    era, rs_rpg,
-                    league_avg_rpg, 4.20,
-                    is_starter=is_starter
-                )
-                if is_starter:
-                    proj += wpps * projected_games * 10 + 0.20 * projected_games * -5
 
         total += proj
         players.append({
